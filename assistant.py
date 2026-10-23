@@ -34,6 +34,12 @@ def safe_calculate(expression: str) -> int | float:
     def checked(value: Any) -> int | float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("Only numeric arithmetic is supported.")
+        # Check integers directly: math.isfinite() can overflow when handed
+        # an arbitrarily large Python integer parsed from user input.
+        if isinstance(value, int):
+            if abs(value) > _MAX_NUMBER:
+                raise ValueError("Number or result is outside the supported range.")
+            return value
         if not math.isfinite(value) or abs(value) > _MAX_NUMBER:
             raise ValueError("Number or result is outside the supported range.")
         return value
@@ -81,9 +87,54 @@ class AssistantStorage:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(loaded, dict):
                 raise ValueError("Data file must contain a JSON object.")
-            self.data["nickname"] = str(loaded.get("nickname", ""))[:40]
-            self.data["todos"] = loaded.get("todos", []) if isinstance(loaded.get("todos", []), list) else []
-            self.data["notes"] = loaded.get("notes", []) if isinstance(loaded.get("notes", []), list) else []
+
+            nickname = loaded.get("nickname", "")
+            if not isinstance(nickname, str):
+                nickname = ""
+            clean_todos = []
+            clean_notes = []
+            seen_todo_ids = set()
+            seen_note_ids = set()
+            dropped_items = False
+
+            raw_todos = loaded.get("todos", [])
+            if not isinstance(raw_todos, list):
+                raw_todos = []
+                dropped_items = True
+            for item in raw_todos:
+                if not isinstance(item, dict):
+                    dropped_items = True
+                    continue
+                item_id, text, done = item.get("id"), item.get("text"), item.get("done", False)
+                if (not isinstance(item_id, int) or isinstance(item_id, bool) or item_id < 1
+                        or item_id in seen_todo_ids or not isinstance(text, str)
+                        or not text.strip() or len(text) > 200 or not isinstance(done, bool)):
+                    dropped_items = True
+                    continue
+                clean_todos.append({"id": item_id, "text": text, "done": done})
+                seen_todo_ids.add(item_id)
+
+            raw_notes = loaded.get("notes", [])
+            if not isinstance(raw_notes, list):
+                raw_notes = []
+                dropped_items = True
+            for item in raw_notes:
+                if not isinstance(item, dict):
+                    dropped_items = True
+                    continue
+                item_id, title, body = item.get("id"), item.get("title"), item.get("body")
+                if (not isinstance(item_id, int) or isinstance(item_id, bool) or item_id < 1
+                        or item_id in seen_note_ids or not isinstance(title, str)
+                        or not title.strip() or len(title) > 100 or not isinstance(body, str)
+                        or not body.strip() or len(body) > 2000):
+                    dropped_items = True
+                    continue
+                clean_notes.append({"id": item_id, "title": title, "body": body})
+                seen_note_ids.add(item_id)
+
+            self.data = {"nickname": nickname[:40], "todos": clean_todos, "notes": clean_notes}
+            if dropped_items:
+                self.load_warning = "Some invalid saved entries were ignored; your original data file was left untouched."
         except (json.JSONDecodeError, OSError, ValueError):
             self.load_warning = "Saved data could not be read; the original file was left untouched."
 
@@ -312,7 +363,8 @@ class LocalAssistant:
             return "There are no messages to export yet."
         export_dir = self.storage.path.parent / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"conversation_{self.clock().strftime('%Y%m%d_%H%M%S')}.txt"
+        # Include microseconds so two exports in the same second never overwrite each other.
+        filename = f"conversation_{self.clock().strftime('%Y%m%d_%H%M%S_%f')}.txt"
         destination = export_dir / filename
         lines = ["Nova Conversation Export", "=" * 24, ""]
         for speaker, text in self.history:
