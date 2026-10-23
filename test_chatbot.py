@@ -1,4 +1,5 @@
 """Automated tests for Nova. Run: python -m unittest -v."""
+import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -29,6 +30,15 @@ class CalculatorTests(unittest.TestCase):
     def test_rejects_huge_exponent(self):
         with self.assertRaises(ValueError):
             safe_calculate("2 ** 100")
+
+
+    def test_rejects_arbitrarily_large_integer_cleanly(self):
+        with self.assertRaises(ValueError):
+            safe_calculate("9" * 500)
+
+    def test_rejects_infinite_float_literal(self):
+        with self.assertRaises(ValueError):
+            safe_calculate("1e999")
 
 
 class AssistantTests(unittest.TestCase):
@@ -76,6 +86,17 @@ class AssistantTests(unittest.TestCase):
     def test_blank_input(self):
         self.assertIn("/help", self.bot.process("   "))
 
+
+    def test_invalid_saved_entries_are_ignored_safely(self):
+        self.data_file.write_text(json.dumps({
+            "nickname": 123,
+            "todos": ["invalid", {"id": "not-an-int", "text": "bad", "done": False}],
+            "notes": ["invalid", {"id": 1, "title": "", "body": "bad"}],
+        }), encoding="utf-8")
+        bot = LocalAssistant(self.data_file, clock=lambda: self.fixed_time)
+        self.assertIn("invalid saved entries", bot.storage.load_warning)
+        self.assertIn("empty", bot.process("/todo list"))
+        self.assertIn("No notes", bot.process("/note list"))
 
 if __name__ == "__main__":
     unittest.main()
